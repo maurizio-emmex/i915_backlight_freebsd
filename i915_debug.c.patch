@@ -1,0 +1,108 @@
+--- /usr/src/sys/dev/drm2/i915/i915_debug.c.orig	2015-03-18 11:09:13.000000000 +0100
++++ /usr/src/sys/dev/drm2/i915/i915_debug.c			working copy
+@@ -38,6 +38,8 @@
+ 
+ #include <sys/sysctl.h>
+ 
++#define NUM_ELEMENTS(array) (sizeof(array) / sizeof(array[0]))
++
+ enum {
+ 	ACTIVE_LIST,
+ 	FLUSHING_LIST,
+@@ -45,6 +47,9 @@
+ 	PINNED_LIST,
+ };
+ 
++static int brightness_levels[] = {1, 2, 4, 6, 9, 12, 16, 20, 25, 30, 36,
++								  43, 51, 60, 70, 80, 90, 100};
++
+ static const char *yesno(int v)
+ {
+ 	return v ? "yes" : "no";
+@@ -1571,6 +1576,72 @@
+ 	return (0);
+ }
+ 
++static int brightness_incr(int curr)
++{
++	int i;
++	for (i = 0; i < NUM_ELEMENTS(brightness_levels) - 1; ++i)
++		if (curr < brightness_levels[i])
++			break;
++	return brightness_levels[i];
++}
++
++static int brightness_decr(int curr)
++{
++	int i;
++	for (i = NUM_ELEMENTS(brightness_levels) - 1; i > 0; --i)
++		if (brightness_levels[i] < curr)
++			break;
++	return brightness_levels[i];
++}
++
++static int i915_backlight(SYSCTL_HANDLER_ARGS)
++{
++	struct drm_device *dev;
++	drm_i915_private_t *dev_priv;
++	int error, cur_level, level;
++	u32 val, cur, min, max;
++
++	dev = arg1;
++	dev_priv = dev->dev_private;
++	if(dev_priv == NULL)
++		return (EBUSY);
++	DRM_LOCK(dev);
++	cur = intel_panel_get_backlight(dev);
++	max = intel_panel_get_max_backlight(dev);
++	DRM_UNLOCK(dev);
++	
++	if (max == 0)
++		return (ENODEV);
++
++	// XXX specific devices, works fine on ivy bridge though
++	cur_level = level = (max / 2 + 100 * cur) / max;
++	error = sysctl_handle_int(oidp, &level, 0, req);
++	if (error || !req->newptr)
++		return (error);
++
++	if (level == 1000) 
++		val = (max / 100 + brightness_incr(cur_level) * max) / 100;
++	else if (level == -1000)
++		val = (max / 100 + brightness_decr(cur_level) * max) / 100;
++	else if (level < 0 || level > 100)
++		return (EINVAL);
++	else 
++		val= (max / 100 + level * max) / 100;
++
++	min = max / 200;	// 0.5%
++	if (val < min)
++		val = min;
++	else if (val > max)
++		val = max;
++
++	if (val != cur) {
++		DRM_LOCK(dev);
++		intel_panel_set_backlight(dev, val);
++		DRM_UNLOCK(dev);
++	}
++	return (0);
++}
++
+ static struct i915_info_sysctl_list {
+ 	const char *name;
+ 	int (*ptr)(struct drm_device *dev, struct sbuf *m, void *data);
+@@ -1734,7 +1805,12 @@
+ 	    CTLFLAG_RW, &i915_intr_pf, 0, NULL);
+ 	if (oid == NULL)
+ 		return (-ENOMEM);
+-
++	oid = SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(top), OID_AUTO,
++	    "i915_backlight", CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_MPSAFE, dev,
++	    0, i915_backlight, "I", NULL);
++	if (oid == NULL)
++		return (ENOMEM);
++ 
+ 	error = drm_add_busid_modesetting(dev, ctx, top);
+ 	if (error != 0)
+ 		return (error);
