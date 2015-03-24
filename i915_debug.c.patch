@@ -1,5 +1,5 @@
---- /usr/src/sys/dev/drm2/i915/i915_debug.c.orig	2015-03-18 11:09:13.000000000 +0100
-+++ /usr/src/sys/dev/drm2/i915/i915_debug.c			working copy
+--- usr/src/sys/dev/drm2/i915/i915_debug.c.orig	2015-03-18 11:09:13.000000000 +0100
++++ usr/src/sys/dev/drm2/i915/i915_debug.c			working copy
 @@ -38,6 +38,8 @@
  
  #include <sys/sysctl.h>
