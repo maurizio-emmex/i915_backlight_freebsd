@@ -1,0 +1,185 @@
+Index: sys/dev/drm2/i915/i915_debug.c
+===================================================================
+--- sys/dev/drm2/i915/i915_debug.c	(revision 280855)
++++ sys/dev/drm2/i915/i915_debug.c	(working copy)
+@@ -38,6 +38,8 @@
+ 
+ #include <sys/sysctl.h>
+ 
++#define NUM_ELEMENTS(array) (sizeof(array) / sizeof(array[0]))
++
+ enum {
+ 	ACTIVE_LIST,
+ 	FLUSHING_LIST,
+@@ -45,6 +47,9 @@
+ 	PINNED_LIST,
+ };
+ 
++static int brightness_levels[] = {1, 2, 4, 6, 9, 12, 16, 20, 25, 30, 36,
++								  43, 51, 60, 70, 80, 90, 100};
++
+ static const char *yesno(int v)
+ {
+ 	return v ? "yes" : "no";
+@@ -1571,6 +1576,94 @@
+ 	return (0);
+ }
+ 
++static int i915_brightness_incr(int curr)
++{
++	int i;
++	for (i = 0; i < NUM_ELEMENTS(brightness_levels) - 1; ++i)
++		if (curr < brightness_levels[i])
++			break;
++	return brightness_levels[i];
++}
++
++static int i915_brightness_decr(int curr)
++{
++	int i;
++	for (i = NUM_ELEMENTS(brightness_levels) - 1; i > 0; --i)
++		if (brightness_levels[i] < curr)
++			break;
++	return brightness_levels[i];
++}
++
++static int i915_set_backlight(struct drm_device *dev, int level,
++	int cur_level, u32 cur, u32 max)
++{
++	u32 val, min;
++
++	if (cur_level != -1 && level == 1000) 
++		val = (max / 100 + i915_brightness_incr(cur_level) * max) / 100;
++	else if (cur_level != -1 && level == -1000)
++		val = (max / 100 + i915_brightness_decr(cur_level) * max) / 100;
++	else if (level < 0 || level > 100)
++		return (EINVAL);
++	else 
++		val= (max / 100 + level * max) / 100;
++
++	min = max / 200;	// 0.5%
++	if (val < min)
++		val = min;
++	else if (val > max)
++		val = max;
++
++	if (val != cur) {
++		DRM_LOCK(dev);
++		intel_panel_set_backlight(dev, val);
++		DRM_UNLOCK(dev);
++	}
++	return (0);
++}
++
++int i915_set_init_backlight(struct drm_device *dev, int level)
++{
++	u32 cur, max;
++	
++	if(dev == NULL || dev->dev_private == NULL)
++		return (EBUSY);
++		
++	DRM_LOCK(dev);
++	cur = intel_panel_get_backlight(dev);
++	max = intel_panel_get_max_backlight(dev);
++	DRM_UNLOCK(dev);
++	if (max == 0)
++		return (ENODEV);
++
++	return (i915_set_backlight(dev, level, -1, cur, max));
++}
++
++static int i915_backlight(SYSCTL_HANDLER_ARGS)
++{
++	struct drm_device *dev;
++	int error, cur_level, level;
++	u32 cur, max;
++
++	dev = arg1;
++	if(dev == NULL || dev->dev_private == NULL)
++		return (EBUSY);
++
++	DRM_LOCK(dev);
++	cur = intel_panel_get_backlight(dev);
++	max = intel_panel_get_max_backlight(dev);
++	DRM_UNLOCK(dev);
++	if (max == 0)
++		return (ENODEV);
++
++	cur_level = level = (max / 2 + 100 * cur) / max;
++	error = sysctl_handle_int(oidp, &level, 0, req);
++	if (error || !req->newptr)
++		return (error);
++	
++	return (i915_set_backlight(dev, level, cur_level, cur, max));
++}
++
+ static struct i915_info_sysctl_list {
+ 	const char *name;
+ 	int (*ptr)(struct drm_device *dev, struct sbuf *m, void *data);
+@@ -1734,7 +1827,13 @@
+ 	    CTLFLAG_RW, &i915_intr_pf, 0, NULL);
+ 	if (oid == NULL)
+ 		return (-ENOMEM);
+-
++	oid = SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(top), OID_AUTO,
++	    "i915_backlight", CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE,
++	     dev, 0, i915_backlight, "I",
++	     "Intel i915 backlight percentage");
++	if (oid == NULL)
++		return (ENOMEM);
++ 
+ 	error = drm_add_busid_modesetting(dev, ctx, top);
+ 	if (error != 0)
+ 		return (error);
+Index: sys/dev/drm2/i915/i915_drv.c
+===================================================================
+--- sys/dev/drm2/i915/i915_drv.c	(revision 280855)
++++ sys/dev/drm2/i915/i915_drv.c	(working copy)
+@@ -426,14 +426,26 @@
+ }
+ 
+ int i915_modeset;
++static int i915_init_backlight = -1;
+ 
+ static int
+ i915_attach(device_t kdev)
+ {
++	int error, err_backlight;
+ 
+ 	if (i915_modeset == 1)
+ 		i915_driver_info.driver_features |= DRIVER_MODESET;
+-	return (-drm_attach_helper(kdev, i915_pciidlist, &i915_driver_info));
++	error = drm_attach_helper(kdev, i915_pciidlist, &i915_driver_info);
++	if (error == 0 && i915_init_backlight != -1) {
++		err_backlight = i915_set_init_backlight(device_get_softc(kdev),
++			i915_init_backlight);
++		if (err_backlight != 0) {
++			printf("Setting tunable drm.i915.init_backlight "
++				"failed: %d\n", err_backlight);
++		}
++	}
++
++	return (-error);
+ }
+ 
+ static struct fb_info *
+@@ -535,6 +547,7 @@
+ int i915_enable_hangcheck = 1;
+ TUNABLE_INT("drm.i915.enable_hangcheck", &i915_enable_hangcheck);
+ TUNABLE_INT("drm.i915.enable_unsupported", &i915_enable_unsupported);
++TUNABLE_INT("drm.i915.init_backlight", &i915_init_backlight);
+ 
+ #define	PCI_VENDOR_INTEL		0x8086
+ #define INTEL_PCH_DEVICE_ID_MASK	0xff00
+Index: sys/dev/drm2/i915/i915_drv.h
+===================================================================
+--- sys/dev/drm2/i915/i915_drv.h	(revision 280855)
++++ sys/dev/drm2/i915/i915_drv.h	(working copy)
+@@ -1095,6 +1095,7 @@
+ int i915_sysctl_init(struct drm_device *dev, struct sysctl_ctx_list *ctx,
+     struct sysctl_oid *top);
+ void i915_sysctl_cleanup(struct drm_device *dev);
++int i915_set_init_backlight(struct drm_device *dev, int level);
+ 
+ extern int i915_master_create(struct drm_device *dev, struct drm_master *master);
+ extern void i915_master_destroy(struct drm_device *dev, struct drm_master *master);
