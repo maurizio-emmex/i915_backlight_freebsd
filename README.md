@@ -2,7 +2,7 @@
 
 ##Backlight support for the i915 driver via sysctl.
 
-This patch is against FreeBSD 11-CURRENT. I have tested it with r281975 r282101.
+This patch is against **FreeBSD 11-CURRENT**.
 
 You must know how to compile and install the kernel in FreeBSD :-).
 
